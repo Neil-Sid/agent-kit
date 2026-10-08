@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Kit output in any project folder: baselines, profiles, screenshots, ab snapshots
+.kit/
+
+# Logs and editor/OS clutter
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
