@@ -7,12 +7,15 @@ and exits non-zero when something fails. Run them from the project folder (or pa
 node ../agent-kit/bin/kit.mjs <command>
 ```
 
-The project needs a `kit.config.mjs` (below). Output goes to `<project>/.kit/`.
+A `kit.config.mjs` (below) is optional. Without one the kit finds the renderer, scenes and camera itself and runs an
+`idle` scenario; `kit init` writes a starter config naming what it found. Output goes to `<project>/.kit/`.
 
 | command | what it answers | time |
 |---|---|---|
+| `kit init [--force]` | Sets a project up: finds the renderer, scenes and camera, writes `kit.config.mjs` with the page globals that lead to them, adds `.kit/` to `.gitignore`, and saves a first `perf idle` baseline. A bundled app (vite, `bun build`, ...) is built and served from its output folder. | ~20 s |
+| `kit check [scenario...] [--save] [--strict]` | Is this change done? Every scenario once, one verdict line each. Budgets, page errors and counters that rose since the baseline fail; slower frame times only warn. Lint runs last. `--save` accepts the new numbers. | ~30 s per scenario |
 | `kit lint` | Which per-frame code allocates, builds GPU objects or forces shader re-picks. Findings are ranked by what really ran in the last perf runs. | < 1 s |
-| `kit perf <scenario>` | Frame times, JS cost, GC, draw calls, the scene census, shader churn, the top project and library functions, and budgets, all compared against the baseline. | ~30 s |
+| `kit perf [scenario]` | Frame times, JS cost, GC, draw calls, the scene census, shader churn, the top project and library functions, which of your functions the library cost ran under, and budgets, all compared against the baseline. | ~30 s |
 | `kit perf <scenario> --hitches [n]` | What the n worst frames were made of. Each is re-run in a fresh page (same frames, deterministic) with the profiler on for just those frames. `drive(f)` can return a label ("go to Sirius") to name the action before a hitch. | ~30 s per hitch |
 | `kit verify <scenario...> [--ref HEAD\|<folder>] [--runs 3]` | Is my rewrite the same game, and is it faster? The reference (a commit, or another folder such as an untouched copy) runs twice and the working tree once: `config.state()` compared every 60 frames, screenshots diffed ignoring whatever differs between the two reference runs, new console errors. Then alternating timed runs; a speed change counts only when the two sides' ranges don't overlap. Ends with one verdict line and exits 1 if behavior changed. | ~3 min per scenario |
 | `kit render <scenario...> [--batch] [--apply] \| --revert` | Tries the runtime render pass (`lib/render.js`) the same way: without vs with it on one folder. `--apply` installs it (`kit-render.js` + a script tag after the import map) only if every frame checked out the same and it was faster. `kit perf <scenario> --render` profiles with it on. | ~4 min per scenario |
@@ -29,6 +32,8 @@ The project needs a `kit.config.mjs` (below). Output goes to `<project>/.kit/`.
 3. Run `kit perf <scenario>` again. Every metric prints its +/- against the baseline. If `state #...` matches the baseline,
    both runs simulated the same frames, so the comparison is like for like.
 4. Run `kit lint` for the code-level view. Its "measured" section only lists functions that the perf profile saw running.
+5. Before calling the change done, run `kit check`. It fails if a counter rose against the baseline in any scenario;
+   if the rise is intended (a new feature draws more), `kit check --save` makes the new numbers the baseline.
 
 Frame-time numbers move by 10-30 % when other programs load the GPU or CPU. For a decision that matters, use `--runs 3`,
 which takes the median of fresh pages. Counters such as draw calls, allocation, churn, programs and the scene census
@@ -56,23 +61,45 @@ don't depend on machine load, so trust those first.
   project caller. In one WebGPU app that is how a 49 MB/frame re-upload showed up (`DynamicDrawUsage` attributes are re-sent
   on every draw under WebGPURenderer).
 
+- **Zero config.** three.js announces every renderer, scene and loader it builds to `window.__THREE_DEVTOOLS__` (the
+  hook its devtools extension uses), and every render calls `scene.onBeforeRender(renderer, scene, camera)`. The probe
+  listens to both, so whatever the config leaves out has a default:
+  - `renderer`: the one drawing the main scene.
+  - `scenes`: every scene drawn in the last 60 frames, biggest first (one-object post-processing quads are left out).
+  - `ready`: a scene is being drawn and nothing has loaded for a second (no three.js loads or fetches pending, no
+    resource finished, no new geometry, texture or shader program). An app that streams forever starts 10 s after its
+    first frame instead.
+  - `state`: the object count, a hash of every position, and the main camera's pose.
+  - `systems`: time inside `renderer.render` vs the rest of the frame's JS.
+  - `scenarios`: `idle: { warmup: 120, frames: 600 }`.
+
+  A page that waits for a click before it draws never gets ready; the timeout message says so. Set `query` or `ready`
+  for it.
+
 Works with both WebGLRenderer and WebGPURenderer. Chrome is launched with `--enable-unsafe-webgpu`. The kit finds Chrome in
 its default install location on Windows, macOS and Linux; set `KIT_CHROME` to use another Chrome or Chromium. The project
-folder (or `config.site`) is served as static files, so a bundled app needs a build first.
+folder (or `config.serve`) is served as static files, so a bundled app needs a build first.
 
 Profiles come from Chrome DevTools: CPU self time and sampled allocation per `function file:line`. Rows for libraries
 (CDN, `node_modules`, vendor folders) are listed separately, because you usually can't fix them, only call them less.
+The "library cpu / alloc under your functions" sections say which calls of yours to make less often: each library sample
+goes to the nearest project function up its stack, e.g. `2.19  render js/core/post.js:100  refreshUniformsCommon 0.15,
+updateMatrixWorld 0.15, setProgram 0.14`. Code that resumes after an `await` has no caller on its stack and shows as
+"(none of your functions above it)". The probe's own frames are left out of every list.
 
 ## kit.config.mjs (in the project root)
+
+Every key is optional; the probe's defaults (zero config, above) fill in what's left out.
 
 ```js
 export default {
   query: '?dev&autostart',                       // page URL query
   size: '1920x1080',
+  serve: 'dist',                                 // folder every command serves (a bundled app's build output)
   ready: () => window.game?.state === 'playing', // runs in the page; freeze point
   renderer: () => game.renderer,
   scenes: () => [game.scene],                    // for the census and shader churn
-  systems: () => perf.systems(),                 // optional { name: ms/frame } split
+  systems: () => perf.systems(),                 // { name: ms/frame } split
   state: () => ({ ... }),                        // compared for determinism and replays; keep it small
   longMs: 16.7,                                  // a frame over this counts as long
   scenarios: {
@@ -83,11 +110,25 @@ export default {
   site: 'dist',                                  // optional: the folder your host serves; kit net measures it
   build: 'npm run build',                        // optional: kit ab --site dist runs it on both sides first
   hosting: { requests: 10e6, bytes: 1e12 },      // optional: your plan's monthly allowance, for kit net
+  check: { tolerance: { drawCalls: 0.05 } },     // optional: allow a bigger rise in kit check (a fraction of the baseline)
 }
 ```
 
 Every function in the config runs inside the page, so it can only see page globals. `setup` runs while the game is
 frozen, so it must not wait for frames. `drive(f)` runs before each frame, with `f` counted from the start of the run.
+
+## check notes
+
+- Each scenario runs once, as `kit perf` would, and gets one line: `ok`, `new` (no baseline yet, so this run became
+  it), `warn` or `FAIL`, with the reasons indented below it.
+- Fails: a budget, a page error, a `drive` error, or a counter that rose since the baseline. The counters are draw
+  calls and triangles (1 % allowed), shader programs (none), allocation (10 % and 2 KB, as it is sampled), and
+  geometries, textures and programs created during the run (none). Machine load doesn't move these, so a rise is the
+  code. An app with a time-budgeted stream does move them; give it `check.tolerance`.
+- Warns: frame p99 or JS p50 25 % and 0.5 ms slower than the baseline. Confirm with `kit perf <scenario> --runs 3`.
+- "(plays out differently from the baseline)" means the end state differs, so the run isn't like for like.
+- A counter that fell is listed as better; `kit check --save` keeps the new numbers so the next rise is caught.
+- `--strict` also fails on lint findings that ran or are reachable from per-frame code.
 
 ## ab notes
 

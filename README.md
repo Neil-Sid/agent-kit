@@ -24,8 +24,13 @@ a busy machine moves by 10-30 %. agent-kit runs the app in headless Chrome on th
 a seeded `Math.random`, so a scenario plays out the same frames every run, and prints a short report the agent can act
 on. Every command exits non-zero when something fails, so it also works as a check.
 
+- `init`: finds the renderer, scenes and camera on its own, writes a starter `kit.config.mjs` and saves a first
+  baseline. Every command also works with no config at all.
+- `check`: the command to run before calling a change done. Every scenario once, one line each; it fails when a budget
+  is missed, the page throws, or draw calls, triangles, shader programs or allocation rose since the baseline.
 - `perf`: frame times, JS cost, GC, allocation, draw calls, a scene census, shader churn, GPU re-uploads and the top
-  functions, compared against a saved baseline and checked against budgets. `--hitches` profiles just the worst frames.
+  functions, compared against a saved baseline and checked against budgets. Library cost is charged to the function of
+  yours it ran under. `--hitches` profiles just the worst frames.
 - `lint`: static checks for per-frame allocation, GPU objects built mid-game and shader re-picks, ranked by what really
   ran in the last perf run.
 - `verify` and `ab`: a commit or another folder against the working tree. Same state, same pixels (ignoring the app's
@@ -54,14 +59,25 @@ cd agent-kit
 npm install
 ```
 
-Add a `kit.config.mjs` to your project. Its functions run inside the page, so the app needs to put what they read on
-`window`:
+Then, from your project folder:
+
+```bash
+node ../agent-kit/bin/kit.mjs init
+```
+
+It opens the page, finds the renderer and scenes (three.js announces them to its devtools hook), writes
+`kit.config.mjs` and saves a baseline of an `idle` scenario. Make a change, then:
+
+```bash
+node ../agent-kit/bin/kit.mjs check
+```
+
+The config is where you add your own scenarios. Its functions run inside the page, so they can only read what the app
+puts on `window`:
 
 ```js
 export default {
   ready: () => window.app?.started,      // the run starts the frame this is true
-  renderer: () => app.renderer,
-  scenes: () => [app.scene],
   state: () => ({ score: app.score }),   // compared between runs; keep it small
   scenarios: {
     idle: { warmup: 120, frames: 600 },
@@ -71,20 +87,13 @@ export default {
 }
 ```
 
-Then, from the project folder:
-
-```bash
-node ../agent-kit/bin/kit.mjs perf idle --save
-```
-
-Make a change and run it again: every metric prints its difference from the saved baseline.
-
 ## Requirements
 
 - Node 22.12 or newer.
 - Chrome or Chromium. The kit looks in the default install location on Windows, macOS and Linux; elsewhere, set
   `KIT_CHROME` to the executable.
-- The project folder is served as static files. For a bundled app, set `site: 'dist'` in the config and build first.
+- The project folder is served as static files. For a bundled app, set `serve: 'dist'` in the config and build first
+  (`kit init` does both when it sees vite, `bun build` or another bundler in package.json).
 - `ab` needs the project to be a git repository. `render` needs `three` in an import map.
 
 Built and used on Windows with a discrete GPU. Other platforms should work but haven't been tested much.
